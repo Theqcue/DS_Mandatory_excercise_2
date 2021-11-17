@@ -1,0 +1,445 @@
+---
+title: "Mandatory Excercise 2"
+author: "HeleneEriksen"
+date: "11/15/2021"
+output: pdf_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library("tidyverse")
+library("quanteda")
+library("glmnet")
+library("caret")
+library("pROC")
+library("ggplot2")
+library("dplyr")
+library("margins") 
+library("stargazer")
+library("tidymodels")
+library("tinytex")
+
+
+IRS_audits <- read.csv("IRSaudits.csv", header = TRUE, stringsAsFactors = FALSE, encoding = "UTF-8")
+
+summary(IRS_audits)
+
+set.seed(888)
+
+```
+
+# Question 1
+Split your dataset into a training and a testing set
+
+```{r SplittingData}
+IRS_audits.split <- IRS_audits %>% 
+  initial_split(prop = 0.8)
+train_data <- training(IRS_audits.split ) %>%
+drop_na(turnover_volume, total_capital, income_taxes, market_value, prices_adj)
+test_data <- testing(IRS_audits.split ) %>%
+drop_na(turnover_volume, total_capital, income_taxes, market_value, prices_adj)
+```
+
+# Question 2 and 3
+Fit at least two linear regression models and two logistic regression models, where the second set of models include more predictors than the first. Use IRS_audit as the outcome.
+Estimate an additional linear regression and a logistic regression but add at least one non-lineartransformation. You do not have to provide an in-depth interpretation of the coefficient.
+
+## Linear regression models
+```{r CreatingRegressionModel}
+mod1 <- lm(IRS_audit ~ prices_adj + year + total_capital, data = train_data)
+mod2 <- lm(IRS_audit ~ turnover_volume+ total_capital+ income_taxes+ market_value+ prices_adj, data = train_data)
+mod1_NonLinear_transformation <- lm(IRS_audit ~ (market_value^3) + (prices_adj^2), data = train_data)
+```
+
+##  logistic regression models
+
+```{r 1models, results = 'asis'}
+m1 <- glm(IRS_audit ~ prices_adj + year + total_capital, data = train_data,
+          family = binomial(link = "logit"))
+m2 <- glm(IRS_audit ~ turnover_volume+ total_capital+ income_taxes+ market_value+ prices_adj+ year,
+          data = train_data,
+          family = binomial(link = "logit")) 
+m3_NonLinear_transformation <-glm(IRS_audit ~ (turnover_volume^2)+ (total_capital^3)+ (income_taxes^4)+ (market_value^5),
+          data = train_data,
+          family = binomial(link = "logit"))
+```
+
+## coefficients for logistic models
+```{r CoeficitensForModel}
+coef(m1)
+coef(m2)
+coef(m3_NonLinear_transformation)
+```
+
+## coefficients for linear models
+```{r CoeficitensForModel2}
+coef(mod1)
+coef(mod2)
+coef(mod1_NonLinear_transformation)
+```
+
+```{r models, include=FALSE}
+stargazer(mod1, mod2, mod1_NonLinear_transformation, type="latex", header=FALSE)
+```
+
+```{r modelsLogisticR, include=FALSE}
+stargazer(m1, m2,m3_NonLinear_transformation, type="latex", header=FALSE)
+```
+
+## Discuss the models and interpret your results
+
+It is interesting to look at the coefficients for the different models. We can see the one with the largest coefficients is for the linear model number 2, which is the one with the most amount of parameters. It has a coefficients of 7.23 which means that every time the turnover volume of a company goes up by one, the prediction will have a higher chance of getting an IRS audit. 
+
+Another one that is high is the income tax in the logistic model, with non-linear transformations. Here if you have a high income tax, there is a higher change of getting a visit by the IRS, which makes sense, since if they have a high income tax, then they are more likely to be a larger company, and therefore is of more interest to IRS. 
+
+
+## Lasso and Ridge regression 
+
+### Ridge - linear Regression:
+```{r RidgeLinearRegression}
+train_data_Ridge <- train_data %>% drop_na()
+outcome <- train_data_Ridge %>% dplyr::select(IRS_audit) %>% as.matrix()
+X_vars <- train_data_Ridge %>% dplyr::select(-IRS_audit) %>% as.matrix()
+ridge <- cv.glmnet(x = X_vars, y = outcome,
+                   alpha = 0, 
+                   nfolds = 5, intercept = TRUE, family = "binomial", 
+                   type.measure = "mse") # use mse for linear models
+ridge_fit <- glmnet(x =X_vars, y = outcome,
+                    alpha = 0,  lambda = ridge$lambda.min,
+                    standardize = TRUE,
+                    family = "binomial")
+```
+## Lasso logistic regression
+```{r Las, results = 'asis'}
+lasso <- cv.glmnet(x = X_vars, y = outcome,
+                   family = "binomial", alpha = 1, nfolds = 5, 
+                   parallel = TRUE, intercept = TRUE,
+                   type.measure = "class") #Use for logistic model
+lasso_fit <- glmnet(x = X_vars, y = outcome, alpha = 1,  lambda = lasso$lambda.min,
+                    standardize = TRUE,
+                    family = "binomial")
+```
+
+```{r GetTopPredictors, include=FALSE}
+
+best.lambda <- which(lasso$lambda == lasso$lambda.min)
+beta <- lasso$glmnet.fit$beta[, best.lambda]
+coef_lasso <- data.frame(lasso_est = as.numeric(beta),
+                         lasso_choice = names(beta), 
+                         stringsAsFactors = FALSE) %>%
+  arrange(desc(lasso_est)) %>%
+  head(10)
+best.lambda.ridge <- which(ridge$lambda == ridge$lambda.min)
+beta.ridge <- ridge$glmnet.fit$beta[, best.lambda.ridge]
+coef_ridge <- data.frame(ridge_est = as.numeric(beta.ridge),
+                         ridge_choice = names(beta.ridge), 
+                         stringsAsFactors = FALSE) %>%
+  arrange(desc(ridge_est)) %>%
+  head(10)
+df <- data.frame(coef_lasso, coef_ridge)
+df
+
+##Getting Accuracy - in sample
+
+train_data_Ridge$preds_ridge <- predict(ridge_fit, newx = X_vars,
+                       type = "response")
+
+train_data_Ridge$preds_lasso <- predict(lasso_fit, newx = X_vars, 
+                       type = "response")
+train_data_Ridge$class_IRS_audit_in_ridge <- ifelse(train_data_Ridge$preds_ridge > median(train_data_Ridge$preds_ridge), 
+                                      1, 0)
+train_data_Ridge$class_IRS_audit_in_lasso <- ifelse(train_data_Ridge$preds_lasso > median(train_data_Ridge$preds_lasso), 
+                                      1, 0)
+
+conf_ridge_in_1 <- confusionMatrix(factor(train_data_Ridge$IRS_audit), 
+                        factor(train_data_Ridge$class_IRS_audit_in_ridge))
+
+conf_lasso_in_1 <- confusionMatrix(factor(train_data_Ridge$IRS_audit), 
+                        factor(train_data_Ridge$class_IRS_audit_in_lasso))
+
+## Getting accuracy - out of sample
+test_data_s <- test_data %>% drop_na()
+X_vars_test <- test_data_s %>% dplyr::select(-IRS_audit) %>% as.matrix()
+
+test_data_s$preds_ridge <- predict(ridge_fit, newx = X_vars_test,
+                       type = "response")
+
+test_data_s$preds_lasso <- predict(lasso_fit, X_vars_test, 
+                       type = "response")
+
+test_data_s$class_IRS_audit_out_ridge <- ifelse(test_data_s$preds_ridge > median(test_data_s$preds_ridge), 
+                                      1, 0)
+test_data_s$class_IRS_audit_out_lasso <- ifelse(test_data_s$preds_lasso > median(test_data_s$preds_lasso), 
+                                      1, 0)
+conf_ridge_out_1 <- confusionMatrix(factor(test_data_s$IRS_audit), 
+                        factor(test_data_s$class_IRS_audit_out_ridge))
+conf_lasso_out_1 <- confusionMatrix(factor(test_data_s$IRS_audit), 
+                        factor(test_data_s$class_IRS_audit_out_lasso))
+```
+These are the top predictors for lasso and ridge
+```{r GetTopPredictorsShow}
+df
+```
+It is interesting to see here that the top predictor for both models are price_adj, which is can see makes sense. If the price of the firms stock has changed a lot, then it would be worth for the IRS to double check that they have done their calculations correctly and have paid the right amount of tax. Especially if there has been a large decrease/increase over a short amount of time.
+It is interesting to see, that in the other linear models, the price_adj is also one of the high predictors, in all 3 models, where in the logistic models, the price_adj, is not that high of an predictor. 
+i
+
+# Question 4
+Compare the models using customary metrics and discuss the results. Which model performs betterand why? How does performance vary between the training and testing set? Discuss the reason for thevariation in performance.
+
+## RMSE in and out of sample -> Linear Regression 
+
+```{r mode1ls, include=FALSE}
+train_data_r <- train_data
+
+train_data_r$pred_small <- predict(mod1)
+train_data_r$pred_large <- predict(mod2)
+train_data_r$pred_large_non_linear <- predict(mod1_NonLinear_transformation)
+
+# calculate root mean squared error (RMSE) in-sample
+mod1_RSME_in <- sqrt(mean((train_data_r$IRS_audit - train_data_r$pred_small)^2))
+mod2_RSME_in <- sqrt(mean((train_data_r$IRS_audit - train_data_r$pred_large)^2))
+mod_NL_RSME_in <- sqrt(mean((train_data_r$IRS_audit - train_data_r$pred_large_non_linear)^2))
+
+
+# out-of-sample prediction
+test_data$pred_small_out <- predict(mod1, newdata = test_data)
+test_data$pred_large_out <- predict(mod2, newdata = test_data)
+test_data$pred_large_out_non_linear <- predict(mod1_NonLinear_transformation, newdata = test_data)
+
+# calculate RMSE out-of-sample
+mod1_RMSE <- sqrt(mean((test_data$IRS_audit - test_data$pred_small_out)^2))
+mod2_RMSE <-sqrt(mean((test_data$IRS_audit - test_data$pred_large_out)^2))
+mod_NL_RMSE <-sqrt(mean((test_data$IRS_audit - test_data$pred_large_out_non_linear)^2))
+
+names <- c('out of sample', 'insample')
+RMSE_mod_1 <- c(mod1_RMSE, mod1_RSME_in)
+RMSE_mod_2 <- c(mod2_RMSE, mod2_RSME_in)
+RMSE_mod_NL <- c(mod_NL_RMSE, mod_NL_RSME_in)
+
+df_lin <- data.frame(names, RMSE_mod_1,RMSE_mod_2, RMSE_mod_NL)
+df_lin
+```
+## RMSE in and out of sample Logistic regression
+
+```{r model1s, include=FALSE}
+train_data_log <- train_data
+test_data_log <- test_data
+
+train_data_log$pred_small_log <- predict(m1)
+train_data_log$pred_large_log <- predict(m2)
+train_data_log$pred_large_non_linear_log <- predict(m3_NonLinear_transformation)
+
+m1_RSME_in <- sqrt(mean((train_data_log$IRS_audit - train_data_log$pred_small_log)^2))
+m2_RSME_in <- sqrt(mean((train_data_log$IRS_audit - train_data_log$pred_large_log)^2))
+m3_NL_RSME_in <- sqrt(mean((train_data_log$IRS_audit - train_data_log$pred_large_non_linear_log)^2))
+
+
+# out-of-sample prediction
+test_data_log$pred_small_out <- predict(m1, newdata = test_data_log)
+test_data_log$pred_large_out <- predict(m2, newdata = test_data_log)
+test_data_log$pred_large_out_non_linear <- predict(m3_NonLinear_transformation, newdata = test_data_log)
+
+# calculate RMSE out-of-sample
+m1_RMSE <- sqrt(mean((test_data_log$IRS_audit - test_data_log$pred_small_out)^2))
+m2_RMSE <-sqrt(mean((test_data_log$IRS_audit - test_data_log$pred_large_out)^2))
+m_NL_RMSE <-sqrt(mean((test_data_log$IRS_audit - test_data_log$pred_large_out_non_linear)^2))
+
+names <- c('out of sample', 'insample')
+RMSE_m_1 <- c(m1_RMSE, mod1_RSME_in)
+RMSE_m_2 <- c(m2_RMSE, mod2_RSME_in)
+RMSE_m_NL <- c(mod_NL_RMSE, mod_NL_RSME_in)
+
+df_log <- data.frame(names, RMSE_m_1,RMSE_m_2, RMSE_m_NL)
+
+```
+
+### RMSE for Linear regression
+```{r RMSE_Lim}
+df_lin
+```
+### RMSe for Logistic regression
+```{r RMSE_log}
+df_log
+```
+
+```{r OtherThings, include=FALSE}
+#Log regression in - mod 1
+train_data_log$pred_prob <- predict(m1, type = "response")
+
+train_data_log$class_IRS_audit <- ifelse(train_data_log$pred_prob > median(train_data_log$pred_prob), 
+                                      1, 0)
+
+conf_log_in_1 <- confusionMatrix(factor(train_data_log$IRS_audit), 
+                        factor(train_data_log$class_IRS_audit))
+conf_log_in_1
+
+
+#Out Of sample - mod 1
+test_data_log$pred_prob_out <- predict(m1, type = "response", newdata = test_data_log)
+
+test_data_log$class_IRS_audit_out <- ifelse(test_data_log$pred_prob_out > median(test_data_log$pred_prob_out), 
+                                      1, 0)
+
+conf_log_out_1 <- confusionMatrix(factor(test_data_log$IRS_audit), 
+                        factor(test_data_log$class_IRS_audit_out))
+conf_log_out_1
+
+#Linear regression in - mod 1
+
+test_data_r <- test_data
+train_data_r$pred_prob <- predict(mod1, type = "response")
+train_data_r$class_IRS_audit <- ifelse(train_data_r$pred_prob > median(train_data_r$pred_prob), 
+                                      1, 0)
+conf_lin_in_1 <- confusionMatrix(factor(train_data_r$IRS_audit), 
+                        factor(train_data_r$class_IRS_audit))
+conf_lin_in_1
+
+
+#Out Of sample: - mod 2
+test_data_r$pred_prob_out <- predict(mod1, type = "response", newdata = test_data_r)
+test_data_r$class_IRS_audit_out <- ifelse(test_data_r$pred_prob_out > median(test_data_r$pred_prob_out), 
+                                      1, 0)
+conf_lin_out_1 <- confusionMatrix(factor(test_data_r$IRS_audit), 
+                        factor(test_data_r$class_IRS_audit_out))
+conf_lin_out_1
+
+
+#Linear regression in - mod 2
+
+test_data_r <- test_data
+train_data_r$pred_prob <- predict(mod2, type = "response")
+train_data_r$class_IRS_audit <- ifelse(train_data_r$pred_prob > median(train_data_r$pred_prob), 
+                                      1, 0)
+conf_lin_in_2 <- confusionMatrix(factor(train_data_r$IRS_audit), 
+                        factor(train_data_r$class_IRS_audit))
+conf_lin_in_2
+
+
+#Out Of sample: - mod 2
+test_data_r$pred_prob_out <- predict(mod2, type = "response", newdata = test_data_r)
+test_data_r$class_IRS_audit_out <- ifelse(test_data_r$pred_prob_out > median(test_data_r$pred_prob_out), 
+                                      1, 0)
+conf_lin_out_2 <- confusionMatrix(factor(test_data_r$IRS_audit), 
+                        factor(test_data_r$class_IRS_audit_out))
+conf_lin_out_2
+
+#Log regression in - mod 2
+train_data_log$pred_prob <- predict(m2, type = "response")
+
+train_data_log$class_IRS_audit <- ifelse(train_data_log$pred_prob > median(train_data_log$pred_prob), 
+                                      1, 0)
+
+conf_log_in_2 <- confusionMatrix(factor(train_data_log$IRS_audit), 
+                        factor(train_data_log$class_IRS_audit))
+conf_log_in_2
+
+
+#Out Of sample: mod 2
+test_data_log$pred_prob_out <- predict(m2, type = "response", newdata = test_data_log)
+
+test_data_log$class_IRS_audit_out <- ifelse(test_data_log$pred_prob_out > median(test_data_log$pred_prob_out), 
+                                      1, 0)
+
+conf_log_out_2 <- confusionMatrix(factor(test_data_log$IRS_audit), 
+                        factor(test_data_log$class_IRS_audit_out))
+conf_log_out_2
+
+# Linear Regression - mod 3
+
+test_data_r <- test_data
+train_data_r$pred_prob <- predict(mod1_NonLinear_transformation, type = "response")
+train_data_r$class_IRS_audit <- ifelse(train_data_r$pred_prob > median(train_data_r$pred_prob), 
+                                      1, 0)
+conf_lin_in_3 <- confusionMatrix(factor(train_data_r$IRS_audit), 
+                        factor(train_data_r$class_IRS_audit))
+conf_lin_in_3
+
+
+#Out Of sample - mod 3:
+test_data_r$pred_prob_out <- predict(mod1_NonLinear_transformation, type = "response", newdata = test_data_r)
+test_data_r$class_IRS_audit_out <- ifelse(test_data_r$pred_prob_out > median(test_data_r$pred_prob_out), 
+                                      1, 0)
+conf_lin_out_3 <- confusionMatrix(factor(test_data_r$IRS_audit), 
+                        factor(test_data_r$class_IRS_audit_out))
+conf_lin_out_3
+
+#Log regression in - mod 3
+train_data_log$pred_prob <- predict(m3_NonLinear_transformation, type = "response")
+
+train_data_log$class_IRS_audit <- ifelse(train_data_log$pred_prob > median(train_data_log$pred_prob), 
+                                      1, 0)
+
+conf_log_in_3 <- confusionMatrix(factor(train_data_log$IRS_audit), 
+                        factor(train_data_log$class_IRS_audit))
+conf_log_in_3
+
+
+#Out Of sample: - mod 3
+test_data_log$pred_prob_out <- predict(m3_NonLinear_transformation, type = "response", newdata = test_data_log)
+
+test_data_log$class_IRS_audit_out <- ifelse(test_data_log$pred_prob_out > median(test_data_log$pred_prob_out), 
+                                      1, 0)
+
+conf_log_out_3 <- confusionMatrix(factor(test_data_log$IRS_audit), 
+                        factor(test_data_log$class_IRS_audit_out))
+conf_log_out_3
+
+
+Type <- c('OutOfsample', 'InSample')
+Logistic_mod_1 <-c(conf_log_out_1$overall['Accuracy'], conf_log_in_1$overall['Accuracy'])
+Logistic_mod_2 <- c(conf_log_out_2$overall['Accuracy'], conf_log_in_2$overall['Accuracy'])
+Logistic_mod_3 <- c(conf_log_out_3$overall['Accuracy'], conf_log_in_3$overall['Accuracy'])
+Linear_mod_1 <- c(conf_lin_out_1$overall['Accuracy'], conf_lin_in_1$overall['Accuracy'])
+Linear_mod_2 <- c(conf_lin_out_2$overall['Accuracy'], conf_lin_in_2$overall['Accuracy'])
+Linear_mod_3 <-c(conf_lin_out_3$overall['Accuracy'], conf_lin_in_3$overall['Accuracy'])
+lasso_regression <- c(conf_lasso_out_1$overall['Accuracy'], conf_lasso_in_1$overall['Accuracy'])
+Ridge_regression <- c(conf_ridge_out_1$overall['Accuracy'], conf_ridge_in_1$overall['Accuracy'])
+dataframe <- data.frame(Type, Logistic_mod_1, Logistic_mod_2, Logistic_mod_3, Linear_mod_1, Linear_mod_2, Linear_mod_3, lasso_regression,Ridge_regression )
+```
+## Accuracy for the different models
+```{r df}
+dataframe
+```
+
+The root mean squared error tells us about the absolute fit of the model to the data. It looks at the predicted value and compare it to the actual value. So we want the model with the lowest RMSE. 
+We can see that in-sample, the logistic and linear regressions actually looks like they have the same RMSE which i am not sure why. 
+Out of sample, it seems like that the best model with the lowest RMSE is linear regression model 2. 
+
+If we look at the accuracy of the models it tells a different story. If we first look at in-sample then it is the Lasso/Ridge regressions that have the highest accuracy of 63.91. It is however interesting that they end up with the same accuracy. 
+
+Of the other logistic and linear regression it is the linear model 2 which has the highest in sample and out of sample accuracy.  
+ 
+DISCLAIMER:  
+ 
+I am not sure that these calculations are correct, and i think i might have missed something with the dataset. There was a lot of NA values, which i was not so sure what i should do about. I tried to pick the parameters with the least amount of NA values in the models. I would like to get some Feedback on how to handle this situation.
+
+Also i am not sure about the calculations that i made in terms of accuracy and RMSE and i could not really make any sense of any of it! I think something went wrong somewhere so if possible i would love some feedback on this. 
+
+My whole code, can be found here: https://github.com/Theqcue/DS_Mandatory_excercise_2
+
+I am also a bit unsure about what is meant by non-linear transformations and if I have done this part correct or not. Because i tried both making Lasso/Ridge, which goes in and transform the model by penalization, or where i went in manually and added non-linear transformation. So i would like some feedback on this as well. 
+
+# Question 5
+Discuss why a firm would be interested in predicting IRS audits. Which performance metric is best suited for evaluating a model with that goal in mind?
+
+It would be very interesting for a firm to know if they are going to recieve an IRS audit, so they can prepare for this, before they know they have to do this. Therefore it would be best for the model to have recall metric, so that it incorps as many as the true positives as possible. It would be better for them to prepare, and then IRS does not come, then for them to not prepare and for the IRS to come anyway. 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
